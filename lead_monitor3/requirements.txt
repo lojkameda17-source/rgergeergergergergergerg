@@ -1,0 +1,9 @@
+aiogram==3.7.0
+telethon==1.44.0
+openai==1.86.0
+SQLAlchemy==2.0.30
+aiosqlite==0.20.0
+asyncpg==0.29.0
+pydantic-settings==2.3.3
+greenlet==3.0.3
+qrcode[pil]==7.4.2
