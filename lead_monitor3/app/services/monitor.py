@@ -17,7 +17,7 @@ from app.database.repositories.keyword_repo import KeywordRepo
 from app.database.repositories.log_repo import LogRepo
 from app.database.repositories.prompt_repo import PromptRepo
 from app.services.antispam import AntiSpam
-from app.services.matcher import Matcher, build_matcher
+from app.services.matcher import Matcher, build_matcher, looks_like_offer_post
 
 log = logging.getLogger(__name__)
 
@@ -174,6 +174,13 @@ class Monitor:
 
         hit = self._matcher.match(text, self._match_mode)
         if not hit:
+            return
+
+        if looks_like_offer_post(text):
+            log.info(
+                "Account %d SKIP offer/provider post keyword=%r user=%d chat=%d",
+                self.account_id, hit, sender_id, chat_id,
+            )
             return
 
         log.info(

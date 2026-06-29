@@ -1,9 +1,37 @@
 """
 Fast in-memory keyword matcher — zero DB calls per message.
-Supports exact, prefix and phrase (word-order) matching.
+Supports strict phrase matching, mixed fuzzy matching and offer-post filtering.
 """
 import re
 from dataclasses import dataclass, field
+
+
+_OFFER_PATTERNS = [
+    r"\bпредлага(ю|ем|ет|ют)\b",
+    r"\bпредставляем\b",
+    r"\bоказыва(ю|ем|ет|ют)\b",
+    r"\bпомож(ем|ет|ете)\b",
+    r"\bсдела(ю|ем|ет|ют)\b",
+    r"\bразработ(ка|аем|аю|чик|чики)\b",
+    r"\bнаши\s+(услуги|сервисы|софты)\b",
+    r"\bнаш\s+(сервис|софт|бот|продукт)\b",
+    r"\bплатформа\b",
+    r"\bваканси(я|и)\b",
+    r"\bворк\s+из\s+дома\b",
+    r"\bищ(у|ем)\s+(людей|сотрудников|работников|арбитражников|менеджеров)\b",
+    r"\bвсему\s+обуч(им|аем)\b",
+    r"\bкому\s+интересно\b",
+    r"\bписать\s+в\s+лс\b",
+    r"@\w{4,}",
+]
+
+_SEEKER_PATTERNS = [
+    r"\bищ(у|ем)\s+(сервис|услугу|подрядчика|исполнителя|специалиста|человека|арбитражника|рассылк|сайт|бота|парсер)\b",
+    r"\bнуж(ен|на|ны|но)\s+(сервис|услуга|подрядчик|исполнитель|специалист|человек|арбитражник|рассылка|сайт|бот|парсер)\b",
+    r"\bкто\s+(занимается|делает|может|умеет)\b",
+    r"\bкак\s+(сделать|запустить|настроить|найти)\b",
+    r"\bпосоветуйте\b",
+]
 
 
 def _norm(text: str) -> str:
@@ -21,7 +49,7 @@ def _word_eq(a: str, b: str) -> bool:
     return False
 
 
-def _phrase_matches(phrase_tokens: list[str], msg_tokens: list[str]) -> bool:
+def _phrase_matches_fuzzy(phrase_tokens: list[str], msg_tokens: list[str]) -> bool:
     pos = 0
     for pt in phrase_tokens:
         found = False
@@ -36,6 +64,21 @@ def _phrase_matches(phrase_tokens: list[str], msg_tokens: list[str]) -> bool:
     return True
 
 
+def _phrase_matches_strict(phrase_tokens: list[str], msg_tokens: list[str]) -> bool:
+    if not phrase_tokens or len(phrase_tokens) > len(msg_tokens):
+        return False
+    width = len(phrase_tokens)
+    return any(msg_tokens[i:i + width] == phrase_tokens for i in range(len(msg_tokens) - width + 1))
+
+
+def looks_like_offer_post(raw: str) -> bool:
+    """Best-effort guard against ads/job posts from people offering services, not seeking them."""
+    text = raw.lower()
+    offer_score = sum(1 for pattern in _OFFER_PATTERNS if re.search(pattern, text, flags=re.UNICODE))
+    seeker_score = sum(1 for pattern in _SEEKER_PATTERNS if re.search(pattern, text, flags=re.UNICODE))
+    return offer_score >= 2 and offer_score > seeker_score
+
+
 @dataclass
 class Matcher:
     singles: set[str] = field(default_factory=set)
@@ -45,18 +88,27 @@ class Matcher:
         return not self.singles and not self.phrases
 
     def match(self, raw: str, mode: str) -> str | None:
-        """Returns matched keyword or None. mode: 'mixed' | 'phrase'"""
+        """Returns matched keyword or None. mode: 'mixed' | 'phrase'.
+
+        In phrase mode phrases must be exact consecutive normalized words. This
+        prevents a keyword like "ищу арбитражника" from matching a long ad that
+        only contains "ищу" and a distant word with the same prefix as
+        "арбитражника".
+        """
         norm = _norm(raw)
         tokens = norm.split()
         token_set = set(tokens)
 
-        # phrases always checked
-        for orig, ph_tok in self.phrases:
-            if _phrase_matches(ph_tok, tokens):
-                return orig
-
         if mode == "phrase":
+            for orig, ph_tok in self.phrases:
+                if _phrase_matches_strict(ph_tok, tokens):
+                    return orig
             return None
+
+        # mixed mode keeps fuzzy phrase matching for broader discovery.
+        for orig, ph_tok in self.phrases:
+            if _phrase_matches_fuzzy(ph_tok, tokens):
+                return orig
 
         # single-word: exact match
         for kw in self.singles:
