@@ -56,6 +56,15 @@ class AccountRepo:
             await s.execute(update(Account).where(Account.id == worker_id).values(parent_account_id=main_id))
             await s.commit()
 
+    async def unlink_workers_for(self, main_id: int) -> None:
+        async with async_session() as s:
+            await s.execute(
+                update(Account)
+                .where(Account.role == "worker", Account.parent_account_id == main_id)
+                .values(parent_account_id=None)
+            )
+            await s.commit()
+
     async def delete(self, account_id: int) -> None:
         async with async_session() as s:
             await s.execute(delete(Account).where(Account.id == account_id))

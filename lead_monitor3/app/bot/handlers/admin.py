@@ -96,6 +96,12 @@ def _sep(n: int = 24) -> str:
     return "─" * n
 
 
+def _clear_selected_account(account_id: int) -> None:
+    for uid, selected_id in list(_sel.items()):
+        if selected_id == account_id:
+            _sel.pop(uid, None)
+
+
 # ── Дашборд / Главное меню ────────────────────────────────────────────────────
 async def _dashboard(target: Message | CallbackQuery) -> None:
     uid = target.from_user.id
@@ -286,10 +292,10 @@ async def _show_acc_list(c: CallbackQuery, pick_mode: bool = False) -> None:
         else:
             b.button(text=f"▶️ #{a.id}", callback_data=f"acc:start:{a.id}")
         b.button(text=f"⚙️ #{a.id}", callback_data=f"acc:cfg:{a.id}")
+        b.button(text=f"🗑 #{a.id}", callback_data=f"acc:del:ask:{a.id}")
 
-    b.adjust(3)
     b.button(text="⬅️ Назад", callback_data="m:accounts" if not pick_mode else "m:home")
-    b.adjust(3, *(1 for _ in range(100)))  # last button full-width
+    b.adjust(*(4 for _ in rows), 1)
 
     await _edit(c.message, "\n".join(lines), b.as_markup())
     await c.answer()
@@ -376,10 +382,51 @@ async def _show_acc_config(c: CallbackQuery, aid: int) -> None:
     else:
         b.button(text="🔔 Вкл уведомления",  callback_data=f"cfg:ntf:{aid}:1")
 
+    b.button(text="🗑 Удалить аккаунт", callback_data=f"acc:del:ask:{aid}")
     b.button(text="⬅️ Назад", callback_data="acc:list")
     b.adjust(1)
     await _edit(c.message, text, b.as_markup())
     await c.answer()
+
+
+@router.callback_query(F.data.startswith("acc:del:ask:"))
+async def cb_acc_delete_ask(c: CallbackQuery) -> None:
+    aid = int(c.data.split(":")[-1])
+    acc = await _acc.get(aid)
+    if not acc or acc.role != "main":
+        await c.answer("Аккаунт не найден", show_alert=True)
+        return
+    wrks = await _acc.list_workers_for(aid)
+    text = (
+        f"🗑 <b>Удалить основной аккаунт #{aid}?</b>\n"
+        f"{_sep()}\n"
+        f"📱 <code>{acc.phone}</code>\n"
+        f"♻️ Привязанных расходников: <b>{len(wrks)}</b>\n\n"
+        "Мониторинг будет остановлен, аккаунт удалится из системы, "
+        "а расходники будут откреплены."
+    )
+    await _edit(
+        c.message,
+        text,
+        _btn(("✅ Да, удалить", f"acc:del:yes:{aid}"), ("⬅️ Отмена", "acc:list")),
+    )
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("acc:del:yes:"))
+async def cb_acc_delete_yes(c: CallbackQuery) -> None:
+    aid = int(c.data.split(":")[-1])
+    acc = await _acc.get(aid)
+    if not acc or acc.role != "main":
+        await c.answer("Аккаунт уже удалён", show_alert=True)
+        await _show_acc_list(c)
+        return
+    await manager.stop(aid)
+    await _acc.unlink_workers_for(aid)
+    await _acc.delete(aid)
+    _clear_selected_account(aid)
+    await c.answer(f"🗑 Аккаунт #{aid} удалён", show_alert=True)
+    await _show_acc_list(c)
 
 
 @router.callback_query(F.data.startswith("cfg:wm:"))
@@ -677,6 +724,7 @@ async def cb_wrk_list(c: CallbackQuery) -> None:
         lines.append(f"<b>#{w.id}</b>  <code>{w.phone}</code>  <i>({linked})</i>")
         if w.parent_account_id:
             b.button(text=f"❌ Открепить #{w.id}", callback_data=f"wrk:unlink:0:{w.id}")
+        b.button(text=f"🗑 Удалить #{w.id}", callback_data=f"wrk:del:ask:{w.id}")
     b.button(text="🧩 Управление привязками", callback_data="wrk:links")
     b.button(text="⬅️ Назад", callback_data="m:workers")
     b.adjust(1)
@@ -733,6 +781,7 @@ async def _show_main_workers(c: CallbackQuery, main_id: int) -> None:
         for w in linked:
             lines.append(f"  ♻️ #{w.id}  <code>{w.phone}</code>")
             b.button(text=f"❌ Открепить #{w.id}", callback_data=f"wrk:unlink:{main_id}:{w.id}")
+            b.button(text=f"🗑 Удалить #{w.id}", callback_data=f"wrk:del:ask:{w.id}")
     else:
         lines.append("Расходников ещё нет")
 
@@ -742,6 +791,7 @@ async def _show_main_workers(c: CallbackQuery, main_id: int) -> None:
             tag = f"у #{w.parent_account_id}" if w.parent_account_id else "свободен"
             lines.append(f"  ♻️ #{w.id}  <code>{w.phone}</code>  <i>({tag})</i>")
             b.button(text=f"➕ Прикрепить #{w.id}", callback_data=f"wrk:link:{main_id}:{w.id}")
+            b.button(text=f"🗑 Удалить #{w.id}", callback_data=f"wrk:del:ask:{w.id}")
 
     b.button(text="♻️ → Расходник в ЛС", callback_data=f"wrk:wm:{main_id}:worker_dm")
     b.button(text="💬 → Ответ в чат",    callback_data=f"wrk:wm:{main_id}:chat_reply")
@@ -753,6 +803,42 @@ async def _show_main_workers(c: CallbackQuery, main_id: int) -> None:
     b.adjust(1)
     await _edit(c.message, "\n".join(lines)[:3900], b.as_markup())
     await c.answer()
+
+
+@router.callback_query(F.data.startswith("wrk:del:ask:"))
+async def cb_wrk_delete_ask(c: CallbackQuery) -> None:
+    wid = int(c.data.split(":")[-1])
+    worker = await _acc.get(wid)
+    if not worker or worker.role != "worker":
+        await c.answer("Расходник не найден", show_alert=True)
+        return
+    linked = f"прикреплён к #{worker.parent_account_id}" if worker.parent_account_id else "свободен"
+    text = (
+        f"🗑 <b>Удалить расходник #{wid}?</b>\n"
+        f"{_sep()}\n"
+        f"📱 <code>{worker.phone}</code>\n"
+        f"Статус: <i>{linked}</i>\n\n"
+        "Аккаунт удалится из системы и больше не будет использоваться для DM."
+    )
+    await _edit(
+        c.message,
+        text,
+        _btn(("✅ Да, удалить", f"wrk:del:yes:{wid}"), ("⬅️ Отмена", "wrk:list")),
+    )
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("wrk:del:yes:"))
+async def cb_wrk_delete_yes(c: CallbackQuery) -> None:
+    wid = int(c.data.split(":")[-1])
+    worker = await _acc.get(wid)
+    if not worker or worker.role != "worker":
+        await c.answer("Расходник уже удалён", show_alert=True)
+        await cb_wrk_list(c)
+        return
+    await _acc.delete(wid)
+    await c.answer(f"🗑 Расходник #{wid} удалён", show_alert=True)
+    await cb_wrk_list(c)
 
 
 @router.callback_query(F.data.startswith("wrk:main:"))
